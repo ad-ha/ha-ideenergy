@@ -56,7 +56,7 @@ from .const import (
     MAX_RETRIES,
 )
 from .historical_state import HistoricalEntity
-from .barrier import Barrier
+from .barrier import Barrier, DataSource
 
 # Adjust SCAN_INTERVAL to allow two updates within the update window
 #
@@ -84,10 +84,10 @@ class Accumulated(RestoreEntity, SensorEntity):
         self._unique_id = unique_id
 
         self._device_info = device_info
-        self._api = api
         self._contact = contract
 
         self._state = None
+
         self._barrier = Barrier(
             update_window_start_minute=UPDATE_WINDOW_START_MINUTE,
             update_window_end_minute=UPDATE_WINDOW_END_MINUTE,
@@ -95,6 +95,10 @@ class Accumulated(RestoreEntity, SensorEntity):
             max_age=MEASURE_MAX_AGE,
             delay_min_seconds=DELAY_MIN_SECONDS,
             delay_max_seconds=DELAY_MAX_SECONDS,
+            logger=logger.getChild("barrier"),
+        )
+        self._datasource = DataSource(
+            api=api, barrier=self._barrier, logger=logger.getChild("datasource")
         )
 
     @property
@@ -127,14 +131,14 @@ class Accumulated(RestoreEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self):
-        return {
-            # ATTR_LAST_RESET: self.last_reset,
-            ATTR_STATE_CLASS: self.state_class,
-        }
-
-    # @property
-    # def last_reset(self):
-    #     self._last_reset = dt_util.utc_from_timestamp(0)  # Deprecated
+        attrs = {}
+        attrs.update(
+            {
+                ATTR_STATE_CLASS: self.state_class,
+            }
+        )
+        attrs.update({"barrier_" + k: v for (k, v) in self._barrier.attributes.items()})
+        return attrs
 
     @property
     def state_class(self):
@@ -172,26 +176,8 @@ class Accumulated(RestoreEntity, SensorEntity):
     async def async_update(self):
         # Delegate update window, forced updates, min/max age to the barrier
         # If barrier allows the execution just call the API to read measure
-
-        if self._barrier.allowed():
-            try:
-                phase = UpdatePhase.LOGIN
-                await self._api.login()
-
-                phase = UpdatePhase.SELECT_CONTRACT
-                await self._api.select_contract(self._contact)
-
-                phase = UpdatePhase.API_REQUEST
-                measure = await self._api.get_measure()
-
-                self._state = measure.accumulate
-                self._barrier.sucess()
-
-            except ideenergy.ClientError as e:
-                self._logger.debug(f"Error in phase '{phase}': {e}")
-                self._barrier.fail()
-
-        await self._barrier.delay()
+        await self._datasource.update()
+        self.state = self._datasource.data["accumulated"]
 
 
 class Historical(HistoricalEntity, SensorEntity):
